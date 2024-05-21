@@ -18,6 +18,9 @@ using Blockcore.Consensus.BlockInfo;
 using Blockcore.NBitcoin;
 using Blockcore.Features.Consensus.ProvenBlockHeaders;
 using Polly.NoOp;
+using Blockcore.Consensus.TransactionInfo;
+using System.Collections.Concurrent;
+using Microsoft.EntityFrameworkCore;
 
 
 // public class IndexerBitcoin
@@ -125,67 +128,201 @@ public class Indexer
     //Task -> use the prefetched window -> pull complete blocks to create a batch
     //Task -> process the batch and convert it to the models
     //Task -> push the models to postgres
-    public uint maxCacheElements { get; set; }
-    public uint maxBatchSize { get; set; }
+    public int maxCacheElements { get; set; }
+    public int maxBatchSize { get; set; }
+    public int blockLimit { get; set;}
     RPCClient client;
     List<uint256> batchHashList = [];
-    List<uint256> hashCache = [];
+    BlockingCollection<uint256> hashCache;
+    BlockingCollection<List<Block>> batches;
     List<Task<Blockcore.Consensus.BlockInfo.Block>> blocks;
 
+    
     public Indexer(RPCClient Client)
     {
-        maxCacheElements = 200;
+        maxCacheElements = 10;
+        maxBatchSize = 5;
+        blockLimit = 100;
         client = Client;
+        hashCache = new BlockingCollection<uint256>(maxCacheElements);
+        batches = new BlockingCollection<List<Block>>(2);
+        blocks = new(maxBatchSize);
+    }
+    public async Task RunIndexer(){
+        Task cacheFillerTask = Task.Run(() => CacheFiller(1));
+        // await Task.WhenAll(cacheFillerTask);
+        Task batchMakerTask = Task.Run(() => BatchMaker());
+        Task pushBatchTask = Task.Run(() => PushBatchToPostgres());
+        await Task.WhenAll(cacheFillerTask , batchMakerTask, pushBatchTask);
     }
 
     public async Task CacheFiller(uint initIndex)
     {
         uint counter = 0;
-        //starting from the initIndex, start filling the block headers
-        while (hashCache.Count < maxCacheElements)
+        Console.WriteLine("Starting CacheFiller Task");
+        while (true)
         {
-            //make a request to RPC
             try
             {
                 uint256 hash = await client.GetBlockHashAsync((int)initIndex + (int)counter);
+                //blocks till hashCache emptied
                 hashCache.Add(hash);
+                if(counter == maxBatchSize){
+                    Console.WriteLine("Batch pre-sync done on thread: " + Thread.CurrentThread.Name);
+                }
+                if(counter == maxCacheElements){
+                    Console.WriteLine("CacheFilled on thread: " + Thread.CurrentThread.Name);
+                }
+                if(counter >= blockLimit){
+                    break;
+                }
                 counter++;
+                Console.WriteLine(counter);
             }
             catch (Exception ex)
             {
                 Console.WriteLine(ex);
-                Console.WriteLine($"retrying at block height {initIndex + counter}... ");
+                Console.WriteLine($"retrying at block height in 1s {initIndex + counter}... ");
+                await Task.Delay(1000);
             }
         }
-        Console.WriteLine("CacheFilled");
     }
-
     public async Task BatchMaker()
     {
-        //create multiple async task for each block and waitAll
-        //add to batchHashList
-        batchHashList.AddRange(hashCache[0..(int)maxBatchSize]);
-        foreach (uint256 hash in batchHashList)
+        Console.WriteLine("Starting BatchMaker");
+        while (true)
         {
-            blocks.Add(GetBlockTask(hash));
+            //create multiple async task for each block and waitAll
+            //add to batchHashList
+            //block if not will above
+            for (int i = 0; i < maxBatchSize; i++){
+                batchHashList.Add(hashCache.Take());
+            }
+            Console.WriteLine("Blocks added");
+
+            // blocks.AddRange(batchHashList.Select(hash => GetBlockTask(hash)));
+            foreach(var hash in batchHashList){
+                blocks.Add(client.GetBlockAsync(hash));
+            }
+            //now after adding the block tasks we wait for all the tasks to complete
+
+            Console.WriteLine("Loading Blocks");
+            await Task.WhenAll(blocks.ToArray());
+            Console.WriteLine("Blocks Loaded");
+            //again start the cache filler
+
+            //now make the results into a batch with custom model...
+            List<Block> batch = MakeBatch(blocks);
+            // List<Block> batch = [];
+            Console.WriteLine($"Batchsize -> {batch.Count}");
+            batches.Add(batch);
+            batchHashList.Clear();
+            blocks.Clear();
         }
-
-        //now after adding the block tasks we wait for all the tasks to complete
-
-        Task.WaitAll(blocks.ToArray());
-        
-
+    }
+    public async Task PushBatchToPostgres()
+    {
+        Console.WriteLine("Starting push to postgres task");
+        while (true)
+        {
+            List<Block> batch = batches.Take();
+            //TODO -> push batch
+            Console.WriteLine("Pushed batch to db");
+            //instead write to output file
+            await WriteToOutput(batch);
+            await Task.Delay(1000);
+        }
     }
 
-    public async Task<Blockcore.Consensus.BlockInfo.Block> GetBlockTask(uint256 blockHash)
+    public async Task WriteToOutput(List<Block> batch){
+        StringBuilder sb = new();
+        sb.AppendLine("Batch");
+        sb.AppendLine("Blockcount = " + batch.Count);
+        foreach (var block in batch){
+            sb.AppendLine("block");
+            sb.AppendLine(block.PreviousBlockHash);
+            sb.AppendLine(block.BlockHash);
+            sb.AppendLine(block.BlockIndex.ToString());
+            sb.AppendLine("Txn count = " + block.Transactions.Count);
+        }
+        // await File.WriteAllTextAsync("output.txt", sb.ToString());
+        await File.AppendAllTextAsync("output.txt", sb.ToString());
+    }
+
+    public List<Block> MakeBatch(List<Task<Blockcore.Consensus.BlockInfo.Block>> blocks)
     {
-        var block = await client.GetBlockAsync(blockHash);
-        return block;
+        List<Block> output = [];
+        foreach (var block in blocks)
+        {
+            output.Add(MakeBlock(block.Result));
+        }
+        return output;
+    }
+
+    public Block MakeBlock(Blockcore.Consensus.BlockInfo.Block block)
+    {
+        Block output = new();
+        BlockHeader bh = block.Header;
+        output.Version = bh.Version;
+        output.Merkleroot = bh.HashMerkleRoot.ToString();
+        output.Nonce = bh.Nonce.ToString();
+        output.PreviousBlockHash = bh.HashPrevBlock.ToString();
+        output.Bits = bh.Bits.ToString();
+        output.BlockHash = bh.GetHash().ToString();
+        //this has to be dealt with somehow :(
+        output.BlockIndex = 0;
+        output.BlockTime = bh.Time;
+        output.Transactions = [];
+
+        //transactions
+        foreach (var txn in block.Transactions)
+        {
+            output.Transactions.Add(MapTransaction(txn, output.BlockHash));
+        }
+        return output;
+    }
+    public Transaction MapTransaction(Blockcore.Consensus.TransactionInfo.Transaction transaction, string BlockHash)
+    {
+        Transaction txn = new();
+        //TODO -> fix the rawtransaction issue
+        txn.RawTransaction = transaction.ToHex();
+        txn.BlockHash = BlockHash;
+        txn.TXID = transaction.GetHash().ToString();
+        //give the inputs
+        txn.Inputs = [];
+        txn.Outputs = [];
+        uint index = 0;
+        
+        foreach (var Input in transaction.Inputs)
+        {
+            Input input = new();
+            // Blockcore.Consensus.TransactionInfo.OutPoint
+            input.TXID = txn.TXID;
+            input.VOUT = index;
+            input.OutpointTXID = Input.PrevOut.Hash.ToString();
+            input.OutpointVOUT = Input.PrevOut.N;
+            input.ScriptSig = Input.ScriptSig.ToHex();
+            //TODO -> The value needs to be derived from the prevout
+            input.Value = 0;
+            txn.Inputs.Add(input);
+            index++;
+        }
+        index = 0;
+        foreach (var Output in transaction.Outputs)
+        {
+            Output output = new();
+            output.TXID = txn.TXID;
+            output.VOUT = index;
+            output.ScriptPubKeyHex = Output.ScriptPubKey.ToHex();
+            //TODO -> The address needs to be derived
+            output.Address = " ";
+            output.Value = Output.Value;
+            txn.Outputs.Add(output);
+            index++;
+        }
+        return txn;
     }
 }
-
-
-
 //RPC client
 public static class BitcoinMethods
 {
@@ -201,6 +338,7 @@ public static class BitcoinMethods
         {
             UserPassword = new NetworkCredential(userName: rpcUser, password: rpcPassword)
         };
+
         return new RPCClient(rPCCredentialString.ToString(), new Uri(rpcURL), network: network);
     }
 };

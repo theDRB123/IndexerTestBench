@@ -7,6 +7,8 @@ IndexerEFcore indexerEFcore = new();
 // IndexerBitcoin indexerBitcoin = new();
 RPCClient client = BitcoinMethods.GetBitcoinClient();
 
+Indexer indexer = new(Client: client);
+
 Benchmark bmrk = new();
 // bmrk.RunBenchmarks();
 
@@ -16,7 +18,9 @@ Benchmark bmrk = new();
 
 // indexerDapper.TestDapper();
 // indexerEFcore.TestEFCore();
+Console.WriteLine("Starting Indexer");
+await indexer.RunIndexer();
 
-var count = client.GetBlockCount();
 
-Console.WriteLine(count);
+
+

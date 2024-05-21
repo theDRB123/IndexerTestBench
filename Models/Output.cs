@@ -7,7 +7,7 @@ public class Output
     [ForeignKey("Transaction")]
     public string TXID { get; set; }
     [Key]
-    public string VOUT { get; set; }
+    public uint VOUT { get; set; }
     public string Address { get; set; }
     public string ScriptPubKeyHex { get; set; }
     public long Value { get; set; }
