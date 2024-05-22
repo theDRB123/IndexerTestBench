@@ -10,6 +10,7 @@ public class Indexer
     public int maxCacheElements { get; set; }
     public int maxBatchSize { get; set; }
     public int blockLimit { get; set; }
+    int counter;
     RPCClient client;
     List<uint256> batchHashList = [];
     BlockingCollection<uint256> hashCache;
@@ -22,6 +23,7 @@ public class Indexer
         maxCacheElements = 200;
         maxBatchSize = 10;
         blockLimit = 5000;
+        counter = 0;
         client = Client;
         hashCache = new BlockingCollection<uint256>(maxCacheElements);
         batches = new BlockingCollection<Batch>(2);
@@ -46,9 +48,8 @@ public class Indexer
 
     public async Task CacheFiller(uint initIndex)
     {
-        int counter = 0;
         Console.WriteLine("Starting CacheFiller Task");
-        while (true)
+        while (counter <= blockLimit)
         {
             try
             {
@@ -58,7 +59,7 @@ public class Indexer
                 {
                     TaskList.Add(client.GetBlockHashAsync((int)initIndex + (int)counter));
                 }
-                
+
                 Stopwatch sw = new();
                 sw.Start();
                 Console.WriteLine("Starting blockhash download");
@@ -74,15 +75,11 @@ public class Indexer
                 {
                     Console.WriteLine("CacheFilled");
                 }
-                if (counter >= blockLimit)
-                {
-                    break;
-                }
                 Console.WriteLine(counter);
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Problem in downloading..");
+                Console.WriteLine("Problem in downloading.." + ex.Message);
                 Console.WriteLine($"retrying at block height in 1s {initIndex + counter}... ");
                 await Task.Delay(1000);
             }
@@ -91,7 +88,7 @@ public class Indexer
     public async Task BatchMaker()
     {
         Console.WriteLine("Starting BatchMaker");
-        while (true)
+        while (counter <= blockLimit)
         {
             for (int i = 0; i < maxBatchSize; i++)
             {
@@ -103,7 +100,7 @@ public class Indexer
             {
                 blocks.Add(client.GetBlockAsync(hash));
             }
-            
+
             sw.Start();
             Console.WriteLine("Downloading Batch");
             await Task.WhenAll(blocks.ToArray());
@@ -122,7 +119,7 @@ public class Indexer
     public async Task PushBatchToPostgres()
     {
         Console.WriteLine("Starting push to postgres task");
-        while (true)
+        while (counter <= blockLimit)
         {
             Batch batch = batches.Take();
             //TODO -> push batch
