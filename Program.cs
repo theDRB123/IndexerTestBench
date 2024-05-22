@@ -5,7 +5,7 @@ using NBitcoin;
 IndexerDapper indexerDapper = new();
 IndexerEFcore indexerEFcore = new();
 // IndexerBitcoin indexerBitcoin = new();
-RPCClient client = BitcoinMethods.GetBitcoinClient();
+RPCClient client = Network.GetBitcoinClient();
 
 Indexer indexer = new(Client: client);
 
@@ -13,7 +13,7 @@ Benchmark bmrk = new();
 // bmrk.RunBenchmarks();
 
 
-// indexerBitcoin.FetchBlockByHeight(100);
+Console.WriteLine("===> " + client.GetBestBlockHash());
 
 
 // indexerDapper.TestDapper();

@@ -14,4 +14,5 @@ public class Block
     public string Nonce { get; set; }
     public long Version { get; set; }
     public ICollection<Transaction> Transactions { get; set; }
+    public long Size { get; set; }
 }
