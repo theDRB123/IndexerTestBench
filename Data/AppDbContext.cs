@@ -18,10 +18,17 @@ namespace IndexerORM
         protected override void OnConfiguring(DbContextOptionsBuilder options)
         {
             // options.UseNpgsql(configuration.GetConnectionString("PostgresConnection"));
-            options.UseNpgsql("Host=localhost;Port=5432;Database=IndexerBenchmark;Username=postgres;Password=drb");
+            options.UseNpgsql("Host=localhost;Port=5432;Database=IndexerBenchmark;Username=postgres;Password=drb" /*,npgsqlOptionsAction: sqlOptions =>
+            {
+                sqlOptions.EnableRetryOnFailure(
+                    maxRetryCount: 10,
+                    maxRetryDelay: TimeSpan.FromSeconds(30),
+                    errorCodesToAdd: null
+                    );
+            }*/);
         }
 
-        public DbSet<Block> BlockTable { get; set; } 
+        public DbSet<Block> BlockTable { get; set; }
         public DbSet<Transaction> TransactionTable { get; set; }
         public DbSet<Input> InputTable { get; set; }
         public DbSet<Output> OutputTable { get; set; }

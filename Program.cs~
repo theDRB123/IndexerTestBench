@@ -3,7 +3,7 @@ using IndexerORM;
 using Microsoft.EntityFrameworkCore;
 
 
-// DbContext db = new AppDbContext();
+DbContext db = new AppDbContext();
 Console.WriteLine("Connected to Database");
 RPCClient client = Network.GetBitcoinClient();
 Console.WriteLine("Connected to Bitcoin core");
@@ -12,18 +12,17 @@ Console.WriteLine("Connected to Bitcoin core");
 
 //at the moment keep all the other limits as a multiple of maxBatchSize
 Indexer.IndexerConfig config = new Indexer.IndexerConfig(
-hashCacheSize: 10000,
-blockCacheSize: 5000,
-batchCacheSize: 10,
-batchSizeLimit: 10, //in MB
-blockLimit: 25000,
-parallelInsertCount: 5
+maxCacheElements: 1000,
+maxBatchSize: 100,
+maxHashBatchSize: 20,
+maxBatchCount: 5,
+blockLimit: 25000
 );
 
-Indexer indexer = new(Client: client, config /*, db*/ );
+Indexer indexer = new(Client: client, config, db);
 
 Console.WriteLine("Starting Indexer");
-await indexer.RunIndexer(1000000);
+await indexer.RunIndexer(200000);
 
 
 

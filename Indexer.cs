@@ -7,54 +7,58 @@ using Blockcore.Utilities.Extensions;
 using Microsoft.EntityFrameworkCore;
 using EFCore.BulkExtensions;
 using LevelDB;
+using System.Reflection.Metadata;
+using IndexerORM;
 
 
 
 public class Indexer
 {
-    public int maxCacheElements { get; set; }
-    public int maxBatchSize { get; set; }
-    public int maxBatchCount { get; set; }
-    public int maxHashBatchSize { get; set; }
-    public int blockLimit { get; set; }
-    int counter = 0;
+    int HashCacheSize { get; set; }
+    int BlockCacheSize { get; set; }
+    int BatchCacheSize { get; set; }
+    int BatchSizeLimit { get; set; }
+    int BlockLimit { get; set; }
+    int ParallelInsertCount { get; set; }
+    int blockCounter = 0;
     bool preSyncComplete = false;
     RPCClient client;
-    DbContext db;
-    List<uint256> batchHashList = [];
-    BlockingCollection<uint256> hashCache;
-    BlockingCollection<Batch> batches;
-    List<Task<Blockcore.Consensus.BlockInfo.Block>> blocks;
+    // DbContext db;
+    BlockingCollection<uint256> HashCache;
+    BlockingCollection<Block> BlockCache;
+    BlockingCollection<Batch> BatchCache;
 
     public struct IndexerConfig
     {
-        public int maxCacheElements;
-        public int maxBatchSize;
-        public int maxBatchCount;
-        public int maxHashBatchSize;
-        public int blockLimit;
-        public IndexerConfig(int maxCacheElements, int maxBatchSize, int maxBatchCount, int maxHashBatchSize, int blockLimit) : this()
+        public int HashCacheSize { get; set; }
+        public int BlockCacheSize { get; set; }
+        public int BatchCacheSize { get; set; }
+        public int BatchSizeLimit { get; set; }
+        public int BlockLimit { get; set; }
+        public int ParallelInsertCount { get; set; }
+        public IndexerConfig(int hashCacheSize, int blockCacheSize, int batchCacheSize, int batchSizeLimit, int blockLimit, int parallelInsertCount) : this()
         {
-            this.maxCacheElements = maxCacheElements;
-            this.maxBatchSize = maxBatchSize;
-            this.maxBatchCount = maxBatchCount;
-            this.maxHashBatchSize = maxHashBatchSize;
-            this.blockLimit = blockLimit;
+            HashCacheSize = hashCacheSize;
+            BlockCacheSize = blockCacheSize;
+            BatchCacheSize = batchCacheSize;
+            BatchSizeLimit = batchSizeLimit;
+            BlockLimit = blockLimit;
+            ParallelInsertCount = parallelInsertCount;
         }
     }
 
-    public Indexer(RPCClient Client, IndexerConfig config, DbContext DbContext)
+    public Indexer(RPCClient Client, IndexerConfig config /*, DbContext DbContext*/)
     {
-        maxCacheElements = config.maxCacheElements;
-        maxBatchSize = config.maxBatchSize;
-        maxBatchCount = config.maxBatchCount;
-        maxHashBatchSize = config.maxHashBatchSize;
-        blockLimit = config.blockLimit;
+        HashCacheSize = config.HashCacheSize;
+        BlockCacheSize = config.BlockCacheSize;
+        BatchCacheSize = config.BatchCacheSize;
+        BatchSizeLimit = config.BatchSizeLimit;
+        BlockLimit = config.BlockLimit;
+        ParallelInsertCount = config.ParallelInsertCount;
         client = Client;
-        db = DbContext;
-        hashCache = new BlockingCollection<uint256>(maxCacheElements);
-        batches = new BlockingCollection<Batch>(maxBatchCount);
-        blocks = new(maxBatchSize);
+        HashCache = new BlockingCollection<uint256>(HashCacheSize);
+        BlockCache = new BlockingCollection<Block>(BlockCacheSize);
+        BatchCache = new BlockingCollection<Batch>(BatchCacheSize);
     }
     public async Task RunIndexer(long initIndex)
     {
@@ -62,127 +66,184 @@ public class Indexer
         Stopwatch watch_main = new();
         watch_main.Start();
 
-        Task cacheFillerTask = Task.Run(() => CacheFiller(initIndex));
-        Task batchMakerTask = Task.Run(() => BatchMaker());
-        Task pushBatchTask = Task.Run(() => PushBatchToPostgres());
+        List<Task> tasks = [];
 
-        await Task.WhenAll(cacheFillerTask, batchMakerTask, pushBatchTask);
+        tasks.Add(Task.Run(() => CacheFiller(initIndex)));
+        tasks.Add(Task.Run(() => BlockPuller()));
+        tasks.Add(Task.Run(() => BatchMaker()));
+
+        List<DbContext> db = [];
+        for (int i = 0; i < ParallelInsertCount; i++)
+        {
+            DbContext context = new AppDbContext();
+            context.Database.SetCommandTimeout(200);
+            db.Add(context);
+        }   
+        foreach(var context in db){
+            tasks.Add(Task.Run(() => PushBatchToPostgres(context)));
+        }
+        await Task.WhenAll(tasks);
         watch_main.Stop();
         Console.WriteLine("Time taken ==> " + watch_main.Elapsed + "s"); ;
     }
-
     public async Task CacheFiller(long initIndex)
     {
         Console.WriteLine("Starting CacheFiller Task");
-        while (counter < blockLimit)
+
+        int counter = 0;
+        while (counter < BlockLimit)
         {
             try
             {
                 List<Task<uint256>> TaskList = [];
-                for (int i = 0; i < maxHashBatchSize; i++)
+                for (int i = 0; i < 10; i++)
                 {
-                    TaskList.Add(client.GetBlockHashAsync((int)initIndex + (int)counter));
+                    TaskList.Add(client.GetBlockHashAsync((int)initIndex + counter));
                     counter++;
                 }
                 Stopwatch sw = new();
                 sw.Start();
-                // Console.WriteLine("Starting blockhash download");
                 await Task.WhenAll(TaskList.ToArray());
-                // counter += maxHashBatchSize;
                 sw.Stop();
                 foreach (var task in TaskList)
                 {
-                    hashCache.Add(task.Result);
+                    HashCache.Add(task.Result);
                 }
-                if(counter % maxBatchSize == 0){
+                if (counter % 5000 == 0)
+                {
                     Console.WriteLine(counter);
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine("Problem in downloading.." + ex.Message);
-                Console.WriteLine($"retrying at block height in 1s {initIndex + counter}... ");
-                await Task.Delay(1000);
+                counter -= 10;
+                Console.WriteLine($"retrying at block height => {initIndex + counter} in 2s..");
+                await Task.Delay(2000);
             }
         }
-        hashCache.CompleteAdding();
+        HashCache.CompleteAdding();
         Console.WriteLine("Pre-sync task completed");
     }
-    public async Task BatchMaker()
+
+    public async Task BlockPuller()
     {
-        Console.WriteLine("Starting BatchMaker");
-        while (!hashCache.IsCompleted)
+        //pull the block and push to the BlockCache
+        Console.WriteLine("Starting Block Puller Task");
+
+        while (!HashCache.IsCompleted)
         {
             try
             {
-                // Console.WriteLine("Starting Batch");
-                for (int i = 0; i < maxBatchSize; i++)
+                List<Task<Blockcore.Consensus.BlockInfo.Block>> TaskList = [];
+                for (int i = 0; i < 10; i++)
                 {
-                    batchHashList.Add(hashCache.Take());
+                    var hash = HashCache.Take();
+                    TaskList.Add(client.GetBlockAsync(hash));
                 }
                 Stopwatch sw = new();
-                // blocks.AddRange(batchHashList.Select(hash => client.GetBlockAsync(hash)));
-                foreach (var hash in batchHashList)
+                sw.Start();
+                await Task.WhenAll(TaskList.ToArray());
+
+                foreach (var task in TaskList)
                 {
-                    blocks.Add(client.GetBlockAsync(hash));
+                    BlockCache.Add(BlockOperations.MakeBlock(task.Result));
                 }
-
-                sw.Start();
-                // Console.WriteLine("Downloading Batch");
-                await Task.WhenAll(blocks.ToArray());
-                sw.Stop();
-                // Console.WriteLine("Batch downloaded : Time taken => " + sw.ElapsedMilliseconds + "ms");
-                sw.Start();
-                Batch batch = BlockOperations.MakeBatch(blocks);
-                batches.Add(batch);
-                sw.Stop();
-                Console.WriteLine("Batchload Completed | Batchsize => " + batch.Size + " | Time taken => " + sw.ElapsedMilliseconds + "ms");
-
-                batchHashList.Clear();
-                blocks.Clear();
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Problem in batchmaker => " + ex.Message);
+                Console.WriteLine("Problem occured in Pulling Blocks => " + ex.Message);
+                //TODO -> Handle the already taken hashes
             }
         }
-        batches.CompleteAdding();
-        Console.WriteLine("Batchmaker Task Completed");
+        BlockCache.CompleteAdding();
+        Console.WriteLine("Block puller task completed");
     }
-    public async Task PushBatchToPostgres()
+
+    public async Task BatchMaker()
     {
-        // Console.WriteLine("Starting push to postgres task");
-        while (!batches.IsCompleted)
+        Console.WriteLine("Starting BatchMaker");
+        while (!BlockCache.IsCompleted)
         {
-            Batch batch = batches.Take();
             try
             {
-                //TODO -> push batch
-                // await WriteToOutput(batch);
-                // IEnumerable<Task> TaskList = batch.blocks.Select((block) => PushToPostgres(block));
-                // await Task.WhenAll(TaskList.ToArray());
+                Console.WriteLine("Starting new batch");
+                Batch batch = new();
+                batch.blocks = [];
+                long size = 0;
+                //batchSizeLimit in MB
+                while (size < BatchSizeLimit * 1000000)
+                {
+
+                    if (BlockCache.TryTake(out var block, TimeSpan.FromMicroseconds(100)))
+                    {
+                        batch.blocks.Add(block);
+                        size += block.Size;
+                    }
+                    else if (BlockCache.IsCompleted)
+                    {
+                        Console.WriteLine("Last batch");
+                        break;
+                    }
+                }
+                batch.Size = size;
+                // Console.WriteLine("Batchload Completed | Batchsize => " + batch.Size);
+                BatchCache.Add(batch);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Problem in batchmaker => " + ex);
+                //TODO -> handle the the already taken blocks
+            }
+        }
+        BatchCache.CompleteAdding();
+        Console.WriteLine("Batchmaker Task Completed");
+    }
+
+    public async Task PushBatchToPostgres(DbContext db)
+    {
+        Console.WriteLine("Starting push to postgres task");
+        while (!BatchCache.IsCompleted)
+        {
+            Batch batch = BatchCache.Take();
+            try
+            {   
+                Console.WriteLine($"Current - thread {Thread.CurrentThread.ManagedThreadId}");
+                Console.WriteLine("Pushing batch to db | size => " + batch.Size + " | Blocks => " + batch.blocks.Count);
                 Stopwatch sw = new();
+                int countRows = 0;
                 sw.Start();
-                // await db.AddRangeAsync(batch.blocks);
-                // await db.SaveChangesAsync();
-                await db.BulkInsertAsync(batch.blocks, options => { options.IncludeGraph = true;});
-                await db.BulkSaveChangesAsync();
-                // await Task.Delay(10);
+                await Task.WhenAll(Task.Run(async () =>
+                {
+                    await db.BulkInsertAsync(batch.blocks, options => { options.IncludeGraph = true; });
+                    await db.BulkSaveChangesAsync();
+                }),
+                Task.Run(() =>
+                {
+                    countRows += batch.blocks.Count;
+                    foreach (var block in batch.blocks)
+                    {
+                        countRows += block.Transactions.Count;
+                        foreach (var txn in block.Transactions)
+                        {
+                            countRows += txn.Inputs.Count + txn.Outputs.Count;
+                        }
+                    }
+                })
+                );
                 sw.Stop();
-                Console.WriteLine("Pushed batch to db | size => " + batch.Size +" | Time taken => " + sw.ElapsedMilliseconds + "ms");
-            }catch(Exception ex){
+                Console.WriteLine($"Current - thread {Thread.CurrentThread.ManagedThreadId}");
+                Console.WriteLine("Pushed batch to db | size => " + batch.Size + " | Rows => " + countRows + " | Blocks => " + batch.blocks.Count + " | Time taken => " + sw.Elapsed + "s");
+            }
+            catch (Exception ex)
+            {
                 Console.WriteLine("Problem in inserting Batch : " + ex);
                 Console.WriteLine("Retrying batch");
-                // batches.Add(batch);
+                // BatchCache.Add(batch);
             }
         }
         Console.WriteLine("Push to postgres task completed");
     }
-
-    // public async Task PushToPostgres(Block block)
-    // {
-    //     await db.AddR (block);
-    // }
 
     public async Task WriteToOutput(Batch batch)
     {
@@ -190,7 +251,8 @@ public class Indexer
         {
             StringBuilder sb = new();
             sb.AppendLine("| Blockcount = " + batch.blocks.Count + " | Batchsize = " + batch.Size);
-            foreach(var block in batch.blocks){
+            foreach (var block in batch.blocks)
+            {
                 sb.AppendLine("| Blockhash -> " + block.BlockHash);
             }
             // foreach (var block in batch.blocks)

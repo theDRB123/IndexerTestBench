@@ -3,25 +3,14 @@ using System.Linq;
 using IndexerORM;
 
 using BenchmarkDotNet.Running;
+using System.Diagnostics;
 
 
 public class Benchmark {
-    public void DapperBenchmark(){
-        IndexerDapper indexerDapper = new();
-        
-    }
-
-    public void EFcoreBenchmark(){
-        IndexerEFcore indexerEFcore = new();
+    Dictionary<String, Stopwatch> stopwatches;
+    
+    public void ShowInfo(){
 
     }
 
-
-    public void RunBenchmarks()
-    {
-        Console.WriteLine("Running Benchmarks for EFcore and Dapper");
-        var summaryDapper = BenchmarkRunner.Run<IndexerDapper>();
-
-
-    }
 }
