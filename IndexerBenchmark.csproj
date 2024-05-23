@@ -13,6 +13,7 @@
     <PackageReference Include="Blockcore.Features.RPC" Version="1.1.41" />
     <PackageReference Include="Blockcore.Networks.Bitcoin" Version="1.1.41" />
     <PackageReference Include="Dapper" Version="2.1.35" />
+    <PackageReference Include="EFCore.BulkExtensions.MIT.PostgreSql" Version="8.16.2" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.5" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.5">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

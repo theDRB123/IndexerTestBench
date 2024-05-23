@@ -7,7 +7,7 @@ using Npgsql;
 
 using BenchmarkDotNet.Attributes;
 
-namespace IndexerBenchmark
+namespace IndexerORM
 {
     public class IndexerDapper
     {
