@@ -2,8 +2,6 @@ using Blockcore.Features.RPC;
 using IndexerORM;
 using Microsoft.EntityFrameworkCore;
 
-IndexerDapper indexerDapper = new();
-IndexerEFcore indexerEFcore = new();
 
 DbContext db = new AppDbContext();
 Console.WriteLine("Connected to Database");

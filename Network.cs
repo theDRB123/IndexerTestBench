@@ -6,9 +6,9 @@ public static class Network
 {
     public static RPCClient GetBitcoinClient()
     {
-        // string rpcURL = "http://4.247.157.198:18332";
+        
         string rpcURL = "http://172.24.198.249:18332";
-        // string rpcURL = "https://go.getblock.io/6c9f9206d6a64ec6a70c659447912cbe";
+        
         string rpcUser = "drb";
         string rpcPassword = "drb";
 
